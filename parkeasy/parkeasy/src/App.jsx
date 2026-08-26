@@ -1,8 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Clock, Phone, IndianRupee, Plus, Search, ParkingCircle, X, Loader2, Car, Camera, List, Map as MapIcon } from 'lucide-react';
+import { MapPin, Clock, Phone, IndianRupee, Plus, Search, ParkingCircle, X, Loader2, Car, Camera, List, Map as MapIcon, MessageCircle, ToggleLeft, ToggleRight } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import LocationPicker from './LocationPicker';
 import ListingsMap from './ListingsMap';
+
+function getOwnerId() {
+  let id = localStorage.getItem('parkeasy_owner_id');
+  if (!id) {
+    id = `owner_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem('parkeasy_owner_id', id);
+  }
+  return id;
+}
+
+function whatsappLink(phone, area) {
+  const digits = phone.replace(/\D/g, '');
+  const withCountryCode = digits.length === 10 ? `91${digits}` : digits;
+  const message = encodeURIComponent(`Hi! Is your parking spot in ${area} available?`);
+  return `https://wa.me/${withCountryCode}?text=${message}`;
+}
 
 const AREAS = [
   'Guindy', 'Tambaram', 'Adyar', 'Velachery', 'T Nagar', 'Anna Nagar',
@@ -45,6 +61,7 @@ export default function App() {
   const [photoPreview, setPhotoPreview] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+  const [ownerId] = useState(getOwnerId);
 
   useEffect(() => {
     loadListings();
@@ -119,6 +136,8 @@ export default function App() {
       lat: location ? location[0] : null,
       lng: location ? location[1] : null,
       photo_url: photoUrl,
+      owner_id: ownerId,
+      is_available: true,
     });
     setSubmitting(false);
     if (error) {
@@ -150,6 +169,18 @@ export default function App() {
     if (!error) {
       setListings(prev => prev.filter(l => l.id !== id));
       showToast('Listing removed.');
+    }
+  }
+
+  async function handleToggleAvailable(l) {
+    const newValue = !l.is_available;
+    const { error } = await supabase
+      .from('listings')
+      .update({ is_available: newValue })
+      .eq('id', l.id);
+    if (!error) {
+      setListings(prev => prev.map(x => x.id === l.id ? { ...x, is_available: newValue } : x));
+      showToast(newValue ? 'Marked as available.' : 'Marked as occupied.');
     }
   }
 
@@ -196,14 +227,34 @@ export default function App() {
           <p style={styles.tagline}>Your neighbour's driveway, your next parking spot.</p>
         </div>
 
-        <svg viewBox="0 0 400 60" style={styles.routeSvg} preserveAspectRatio="none">
-          <path d="M 10 40 Q 100 10, 200 35 T 390 30" stroke="#FFC93C" strokeWidth="3" fill="none" strokeDasharray="1 10" strokeLinecap="round" />
-          <circle cx="10" cy="40" r="5" fill="#FF6B5B" />
-          <circle cx="390" cy="30" r="5" fill="#FF6B5B" />
+        {/* Signature element: "no spot" -> "found a spot" story */}
+        <svg viewBox="0 0 400 90" style={styles.routeSvg} preserveAspectRatio="xMidYMid meet">
+          {/* Left: car circling, no spot */}
+          <g transform="translate(35, 30)">
+            <rect x="-22" y="-6" width="44" height="20" rx="6" fill="none" stroke="#A9B4D0" strokeWidth="2.5" />
+            <circle cx="-12" cy="16" r="5" fill="#A9B4D0" />
+            <circle cx="12" cy="16" r="5" fill="#A9B4D0" />
+            <circle cx="8" cy="-16" r="13" fill="none" stroke="#FF6B5B" strokeWidth="2.5" />
+            <line x1="-1" y1="-25" x2="17" y2="-7" stroke="#FF6B5B" strokeWidth="2.5" strokeLinecap="round" />
+          </g>
+
+          {/* Dashed arrow */}
+          <line x1="90" y1="30" x2="290" y2="30" stroke="#FFC93C" strokeWidth="2.5" strokeDasharray="1 9" strokeLinecap="round" />
+          <path d="M 280 22 L 292 30 L 280 38" fill="none" stroke="#FFC93C" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+
+          {/* Right: driveway with P sign, found a spot */}
+          <g transform="translate(340, 12)">
+            <path d="M -26 20 L -26 0 L 0 -16 L 26 0 L 26 20 Z" fill="none" stroke="#A9B4D0" strokeWidth="2.5" strokeLinejoin="round" />
+            <rect x="-10" y="0" width="20" height="20" fill="#16213E" stroke="#A9B4D0" strokeWidth="1.5" />
+            <rect x="-6" y="4" width="12" height="14" rx="2" fill="#FFC93C" />
+            <text x="0" y="15" fontFamily="Archivo Black, sans-serif" fontSize="11" fill="#16213E" textAnchor="middle">P</text>
+            <circle cx="18" cy="-6" r="9" fill="#16A34A" />
+            <path d="M 14 -6 L 17 -3 L 23 -10" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </g>
         </svg>
         <div style={styles.routeLabels}>
-          <span style={styles.routeLabel}>Guindy</span>
-          <span style={styles.routeLabel}>Tambaram</span>
+          <span style={styles.routeLabel}>No spot in sight</span>
+          <span style={styles.routeLabel}>Found one nearby</span>
         </div>
       </header>
 
@@ -273,13 +324,25 @@ export default function App() {
             ) : (
               <div style={styles.grid}>
                 {filtered.map((l, i) => (
-                  <div key={l.id} className="pe-card" style={{ ...styles.card, animationDelay: `${i * 0.04}s` }}>
+                  <div
+                    key={l.id}
+                    className="pe-card"
+                    style={{
+                      ...styles.card,
+                      animationDelay: `${i * 0.04}s`,
+                      opacity: l.is_available === false ? 0.6 : 1,
+                    }}
+                  >
                     {l.photo_url && (
                       <img src={l.photo_url} alt={`${l.area} parking spot`} style={styles.cardPhoto} />
                     )}
                     <div style={styles.cardTop}>
                       <span style={styles.spotTypeBadge}>{l.spot_type}</span>
-                      <span style={styles.timeAgo}>{timeAgo(l.created_at)}</span>
+                      {l.is_available === false ? (
+                        <span style={styles.occupiedBadge}>Currently occupied</span>
+                      ) : (
+                        <span style={styles.timeAgo}>{timeAgo(l.created_at)}</span>
+                      )}
                     </div>
                     <div style={styles.cardArea}>
                       <MapPin size={16} color="#FF6B5B" />
@@ -301,10 +364,33 @@ export default function App() {
                         <span className="pe-display" style={{ fontSize: 20 }}>{l.price}</span>
                         <span style={styles.perHour}>/hr</span>
                       </div>
-                      <a href={`tel:${l.phone}`} style={styles.callBtn} onClick={() => showToast(`Calling ${l.host_name}…`)}>
-                        <Phone size={14} /> Call {l.host_name.split(' ')[0]}
-                      </a>
+                      <div style={styles.contactBtns}>
+                        <a
+                          href={whatsappLink(l.phone, l.area)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={styles.whatsappBtn}
+                          onClick={() => showToast(`Opening WhatsApp for ${l.host_name}…`)}
+                        >
+                          <MessageCircle size={14} />
+                        </a>
+                        <a href={`tel:${l.phone}`} style={styles.callBtn} onClick={() => showToast(`Calling ${l.host_name}…`)}>
+                          <Phone size={14} /> Call {l.host_name.split(' ')[0]}
+                        </a>
+                      </div>
                     </div>
+                    {l.owner_id === ownerId && (
+                      <button
+                        style={styles.availToggle}
+                        onClick={() => handleToggleAvailable(l)}
+                      >
+                        {l.is_available === false ? (
+                          <><ToggleLeft size={16} /> Mark as available</>
+                        ) : (
+                          <><ToggleRight size={16} color="#16A34A" /> Mark as occupied</>
+                        )}
+                      </button>
+                    )}
                     <button style={styles.removeBtn} onClick={() => handleRemove(l.id)} title="Remove this listing">
                       <X size={13} />
                     </button>
@@ -408,7 +494,7 @@ const styles = {
   brandIcon: { width: 34, height: 34, borderRadius: 9, background: '#FFC93C', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   brandName: { color: '#FAF9F6', fontSize: 22, letterSpacing: '0.5px' },
   tagline: { color: '#A9B4D0', fontSize: 13.5, marginTop: 8, marginBottom: 20, fontWeight: 500 },
-  routeSvg: { width: '100%', height: 40, display: 'block' },
+  routeSvg: { width: '100%', height: 70, display: 'block' },
   routeLabels: { display: 'flex', justifyContent: 'space-between', padding: '2px 22px 16px' },
   routeLabel: { color: '#FF6B5B', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px' },
   tabBar: { display: 'flex', gap: 8, padding: '16px 20px 0', maxWidth: 720, margin: '0 auto' },
@@ -427,6 +513,10 @@ const styles = {
   photoPreviewWrap: { position: 'relative', width: 140 },
   photoPreview: { width: 140, height: 100, objectFit: 'cover', borderRadius: 8, border: '1.5px solid #E5E1D8', display: 'block' },
   removePhotoBtn: { display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, border: 'none', background: 'transparent', color: '#FF6B5B', fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 },
+  occupiedBadge: { fontSize: 11, fontWeight: 700, color: '#B91C1C', background: '#FEE2E2', padding: '3px 8px', borderRadius: 100 },
+  contactBtns: { display: 'flex', alignItems: 'center', gap: 6 },
+  whatsappBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, background: '#25D366', color: '#fff', borderRadius: 8, flexShrink: 0 },
+  availToggle: { display: 'flex', alignItems: 'center', gap: 5, marginTop: 10, width: '100%', justifyContent: 'center', background: '#FAF9F6', border: '1.5px solid #E5E1D8', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontWeight: 700, color: '#16213E', cursor: 'pointer' },
   emptyState: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '50px 20px', textAlign: 'center' },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 },
   card: { position: 'relative', background: '#fff', borderRadius: 14, padding: 16, border: '1.5px solid #EDEAE1', boxShadow: '0 1px 2px rgba(22,33,62,0.04)' },
