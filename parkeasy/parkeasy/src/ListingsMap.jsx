@@ -28,6 +28,9 @@ export default function ListingsMap({ listings, onCall }) {
             <Popup>
               <div style={{ minWidth: 160 }}>
                 <strong>{l.area}</strong>
+                {l.is_available === false && (
+                  <p style={{ margin: '2px 0', color: '#B91C1C', fontSize: 12, fontWeight: 700 }}>Currently occupied</p>
+                )}
                 <p style={{ margin: '4px 0', fontSize: 13 }}>{l.address}</p>
                 <p style={{ margin: '4px 0', fontWeight: 700 }}>₹{l.price}/hr</p>
                 <a href={`tel:${l.phone}`} onClick={() => onCall && onCall(l)}>
