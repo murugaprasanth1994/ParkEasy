@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
-import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
+import React, { useEffect } from 'react';
+import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 
-// Fix default marker icons not loading in bundlers
 const pinIcon = new L.Icon({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -22,18 +21,21 @@ function ClickHandler({ onPick }) {
   return null;
 }
 
+function Recenter({ position }) {
+  const map = useMap();
+  useEffect(() => {
+    if (position) {
+      map.setView(position, Math.max(map.getZoom(), 15));
+    }
+  }, [position ? position[0] : null, position ? position[1] : null]);
+  return null;
+}
+
 export default function LocationPicker({ value, onChange }) {
-  const [position, setPosition] = useState(value || null);
-
-  function handlePick(pos) {
-    setPosition(pos);
-    onChange(pos);
-  }
-
   return (
     <div style={{ borderRadius: 10, overflow: 'hidden', border: '1.5px solid #E5E1D8' }}>
       <MapContainer
-        center={position || CHENNAI_CENTER}
+        center={value || CHENNAI_CENTER}
         zoom={13}
         style={{ height: 220, width: '100%' }}
         scrollWheelZoom={false}
@@ -42,8 +44,9 @@ export default function LocationPicker({ value, onChange }) {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; OpenStreetMap contributors'
         />
-        <ClickHandler onPick={handlePick} />
-        {position && <Marker position={position} icon={pinIcon} />}
+        <ClickHandler onPick={onChange} />
+        {value && <Marker position={value} icon={pinIcon} />}
+        <Recenter position={value} />
       </MapContainer>
     </div>
   );
