@@ -1,14 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { MapPin, Clock, Phone, IndianRupee, Plus, Search, ParkingCircle, X, Loader2, Car, Camera, List, Map as MapIcon, MessageCircle, ToggleLeft, ToggleRight } from 'lucide-react';
+import {
+  MapPin, Clock, Phone, IndianRupee, Plus, Search, ParkingCircle, X, Loader2, Car,
+  Camera, List, Map as MapIcon, MessageCircle, ToggleLeft, ToggleRight, ThumbsUp,
+  ThumbsDown, Minus, Navigation
+} from 'lucide-react';
 import { supabase } from './supabaseClient';
 import LocationPicker from './LocationPicker';
 import ListingsMap from './ListingsMap';
 
-function getOwnerId() {
-  let id = localStorage.getItem('parkeasy_owner_id');
+const AREAS = [
+  'Guindy', 'Tambaram', 'Adyar', 'Velachery', 'T Nagar', 'Anna Nagar',
+  'Porur', 'OMR', 'Chromepet', 'Nungambakkam', 'Mylapore', 'Kelambakkam'
+];
+
+function getDeviceId() {
+  let id = localStorage.getItem('parkeasy_device_id');
   if (!id) {
-    id = `owner_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    localStorage.setItem('parkeasy_owner_id', id);
+    id = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem('parkeasy_device_id', id);
   }
   return id;
 }
@@ -20,10 +29,31 @@ function whatsappLink(phone, area) {
   return `https://wa.me/${withCountryCode}?text=${message}`;
 }
 
-const AREAS = [
-  'Guindy', 'Tambaram', 'Adyar', 'Velachery', 'T Nagar', 'Anna Nagar',
-  'Porur', 'OMR', 'Chromepet', 'Nungambakkam', 'Mylapore', 'Kelambakkam'
-];
+async function geocodeAddress(query) {
+  if (!query || query.trim().length < 5) return null;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.length > 0) {
+      return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 function formatTime(t) {
   if (!t) return '';
@@ -46,38 +76,52 @@ function timeAgo(ts) {
 
 export default function App() {
   const [tab, setTab] = useState('find');
-  const [view, setView] = useState('list'); // 'list' or 'map', within Find tab
+  const [view, setView] = useState('list');
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [toast, setToast] = useState('');
+  const [deviceId] = useState(getDeviceId);
+  const [userLocation, setUserLocation] = useState(null);
+  const [ratings, setRatings] = useState({});
+  const [hoursMap, setHoursMap] = useState({});
 
   const [form, setForm] = useState({
     area: '', address: '', price: '', from: '', to: '',
     hostName: '', phone: '', notes: '', spotType: 'Driveway'
   });
-  const [location, setLocation] = useState(null); // [lat, lng]
+  const [location, setLocation] = useState(null);
+  const [locationSetManually, setLocationSetManually] = useState(false);
+  const [geocoding, setGeocoding] = useState(false);
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
-  const [ownerId] = useState(getOwnerId);
 
   useEffect(() => {
     loadListings();
-
-    // Real-time: auto-refresh when anyone adds/removes a listing
-    const channel = supabase
-      .channel('listings-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'listings' }, () => {
-        loadListings();
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    loadRatings();
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        pos => setUserLocation([pos.coords.latitude, pos.coords.longitude]),
+        () => {}
+      );
+    }
   }, []);
+
+  // Auto-locate the address on the map as the person types (debounced), unless they've manually pinned it
+  useEffect(() => {
+    if (locationSetManually) return;
+    if (!form.address || form.address.trim().length < 5) return;
+    const timer = setTimeout(async () => {
+      setGeocoding(true);
+      const q = `${form.address}, ${form.area || ''}, Chennai, India`;
+      const pos = await geocodeAddress(q);
+      setGeocoding(false);
+      if (pos) setLocation(pos);
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [form.address, form.area, locationSetManually]);
 
   async function loadListings() {
     setLoading(true);
@@ -89,9 +133,27 @@ export default function App() {
     setLoading(false);
   }
 
+  async function loadRatings() {
+    const { data, error } = await supabase.from('ratings').select('listing_id, device_id, thumbs');
+    if (error || !data) return;
+    const map = {};
+    data.forEach(r => {
+      if (!map[r.listing_id]) map[r.listing_id] = { up: 0, total: 0, myVote: null };
+      map[r.listing_id].total += 1;
+      if (r.thumbs) map[r.listing_id].up += 1;
+      if (r.device_id === deviceId) map[r.listing_id].myVote = r.thumbs;
+    });
+    setRatings(map);
+  }
+
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast(''), 2500);
+  }
+
+  function handleManualPin(pos) {
+    setLocation(pos);
+    setLocationSetManually(true);
   }
 
   async function handleSubmit(e) {
@@ -136,8 +198,9 @@ export default function App() {
       lat: location ? location[0] : null,
       lng: location ? location[1] : null,
       photo_url: photoUrl,
-      owner_id: ownerId,
+      owner_id: deviceId,
       is_available: true,
+      booked_by: null,
     });
     setSubmitting(false);
     if (error) {
@@ -146,6 +209,7 @@ export default function App() {
     }
     setForm({ area: '', address: '', price: '', from: '', to: '', hostName: '', phone: '', notes: '', spotType: 'Driveway' });
     setLocation(null);
+    setLocationSetManually(false);
     setPhotoFile(null);
     setPhotoPreview(null);
     showToast('Your spot is live!');
@@ -174,14 +238,57 @@ export default function App() {
 
   async function handleToggleAvailable(l) {
     const newValue = !l.is_available;
-    const { error } = await supabase
-      .from('listings')
-      .update({ is_available: newValue })
-      .eq('id', l.id);
+    const updates = { is_available: newValue, booked_by: newValue ? null : l.booked_by };
+    const { error } = await supabase.from('listings').update(updates).eq('id', l.id);
     if (!error) {
-      setListings(prev => prev.map(x => x.id === l.id ? { ...x, is_available: newValue } : x));
+      setListings(prev => prev.map(x => x.id === l.id ? { ...x, ...updates } : x));
       showToast(newValue ? 'Marked as available.' : 'Marked as occupied.');
     }
+  }
+
+  async function handleBook(l) {
+    const { error } = await supabase
+      .from('listings')
+      .update({ is_available: false, booked_by: deviceId })
+      .eq('id', l.id);
+    if (!error) {
+      setListings(prev => prev.map(x => x.id === l.id ? { ...x, is_available: false, booked_by: deviceId } : x));
+      showToast('Spot booked! Contact the host to confirm.');
+    } else {
+      showToast('Could not book — please try again.');
+    }
+  }
+
+  async function handleCancelBooking(l) {
+    const { error } = await supabase
+      .from('listings')
+      .update({ is_available: true, booked_by: null })
+      .eq('id', l.id);
+    if (!error) {
+      setListings(prev => prev.map(x => x.id === l.id ? { ...x, is_available: true, booked_by: null } : x));
+      showToast('Booking cancelled.');
+    }
+  }
+
+  async function handleRate(listingId, thumbs) {
+    const { error } = await supabase
+      .from('ratings')
+      .upsert({ listing_id: listingId, device_id: deviceId, thumbs }, { onConflict: 'listing_id,device_id' });
+    if (!error) {
+      loadRatings();
+      showToast(thumbs ? 'Thanks for the feedback!' : 'Thanks — noted.');
+    }
+  }
+
+  function getHours(id) {
+    return hoursMap[id] || 1;
+  }
+
+  function changeHours(id, delta) {
+    setHoursMap(prev => {
+      const next = Math.min(24, Math.max(1, (prev[id] || 1) + delta));
+      return { ...prev, [id]: next };
+    });
   }
 
   const filtered = listings.filter(l => {
@@ -216,12 +323,13 @@ export default function App() {
         .pe-card { animation: pe-slide-up 0.35s ease both; }
         .pe-btn-primary:hover { background: #16213E !important; color: #fff !important; }
         .pe-tab:hover { opacity: 0.85; }
+        .pe-book-btn:hover { filter: brightness(1.08); }
       `}</style>
 
       <header style={styles.header}>
         <div style={styles.headerInner}>
           <div style={styles.brand}>
-            <div style={styles.brandIcon}><Car size={20} color="#16213E" strokeWidth={2.5} /></div>
+            <div style={styles.brandIcon}><Car size={30} color="#16213E" strokeWidth={2.5} /></div>
             <span className="pe-display" style={styles.brandName}>ParkEasy</span>
           </div>
           <p style={styles.tagline}>Your neighbour's driveway, your next parking spot.</p>
@@ -229,7 +337,6 @@ export default function App() {
 
         {/* Signature element: "no spot" -> "found a spot" story */}
         <svg viewBox="0 0 400 90" style={styles.routeSvg} preserveAspectRatio="xMidYMid meet">
-          {/* Left: car circling, no spot */}
           <g transform="translate(35, 30)">
             <rect x="-22" y="-6" width="44" height="20" rx="6" fill="none" stroke="#A9B4D0" strokeWidth="2.5" />
             <circle cx="-12" cy="16" r="5" fill="#A9B4D0" />
@@ -237,12 +344,8 @@ export default function App() {
             <circle cx="8" cy="-16" r="13" fill="none" stroke="#FF6B5B" strokeWidth="2.5" />
             <line x1="-1" y1="-25" x2="17" y2="-7" stroke="#FF6B5B" strokeWidth="2.5" strokeLinecap="round" />
           </g>
-
-          {/* Dashed arrow */}
           <line x1="90" y1="30" x2="290" y2="30" stroke="#FFC93C" strokeWidth="2.5" strokeDasharray="1 9" strokeLinecap="round" />
           <path d="M 280 22 L 292 30 L 280 38" fill="none" stroke="#FFC93C" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-
-          {/* Right: driveway with P sign, found a spot */}
           <g transform="translate(340, 12)">
             <path d="M -26 20 L -26 0 L 0 -16 L 26 0 L 26 20 Z" fill="none" stroke="#A9B4D0" strokeWidth="2.5" strokeLinejoin="round" />
             <rect x="-10" y="0" width="20" height="20" fill="#16213E" stroke="#A9B4D0" strokeWidth="1.5" />
@@ -276,18 +379,10 @@ export default function App() {
                 <input style={styles.searchInput} placeholder="Search by area, e.g. Tambaram" value={query} onChange={e => setQuery(e.target.value)} />
               </div>
               <div style={styles.viewToggle}>
-                <button
-                  style={{ ...styles.viewToggleBtn, ...(view === 'list' ? styles.viewToggleBtnActive : {}) }}
-                  onClick={() => setView('list')}
-                  title="List view"
-                >
+                <button style={{ ...styles.viewToggleBtn, ...(view === 'list' ? styles.viewToggleBtnActive : {}) }} onClick={() => setView('list')} title="List view">
                   <List size={16} />
                 </button>
-                <button
-                  style={{ ...styles.viewToggleBtn, ...(view === 'map' ? styles.viewToggleBtnActive : {}) }}
-                  onClick={() => setView('map')}
-                  title="Map view"
-                >
+                <button style={{ ...styles.viewToggleBtn, ...(view === 'map' ? styles.viewToggleBtnActive : {}) }} onClick={() => setView('map')} title="Map view">
                   <MapIcon size={16} />
                 </button>
               </div>
@@ -323,79 +418,128 @@ export default function App() {
               </div>
             ) : (
               <div style={styles.grid}>
-                {filtered.map((l, i) => (
-                  <div
-                    key={l.id}
-                    className="pe-card"
-                    style={{
-                      ...styles.card,
-                      animationDelay: `${i * 0.04}s`,
-                      opacity: l.is_available === false ? 0.6 : 1,
-                    }}
-                  >
-                    {l.photo_url && (
-                      <img src={l.photo_url} alt={`${l.area} parking spot`} style={styles.cardPhoto} />
-                    )}
-                    <div style={styles.cardTop}>
-                      <span style={styles.spotTypeBadge}>{l.spot_type}</span>
-                      {l.is_available === false ? (
-                        <span style={styles.occupiedBadge}>Currently occupied</span>
-                      ) : (
-                        <span style={styles.timeAgo}>{timeAgo(l.created_at)}</span>
+                {filtered.map((l, i) => {
+                  const isOwner = l.owner_id === deviceId;
+                  const isBookedByMe = l.booked_by === deviceId;
+                  const available = l.is_available !== false;
+                  const distanceKm = (userLocation && l.lat != null && l.lng != null)
+                    ? haversineKm(userLocation[0], userLocation[1], l.lat, l.lng)
+                    : null;
+                  const rating = ratings[l.id];
+                  const hours = getHours(l.id);
+                  const estTotal = l.price * hours;
+
+                  return (
+                    <div
+                      key={l.id}
+                      className="pe-card"
+                      style={{
+                        ...styles.card,
+                        ...(available ? styles.cardAvailable : styles.cardBooked),
+                        animationDelay: `${i * 0.04}s`,
+                      }}
+                    >
+                      {l.photo_url && (
+                        <img src={l.photo_url} alt={`${l.area} parking spot`} style={styles.cardPhoto} />
                       )}
-                    </div>
-                    <div style={styles.cardArea}>
-                      <MapPin size={16} color="#FF6B5B" />
-                      <span style={{ fontWeight: 800, fontSize: 16 }}>{l.area}</span>
-                    </div>
-                    <p style={styles.cardAddress}>{l.address}</p>
-                    {(l.from_time || l.to_time) && (
-                      <div style={styles.cardRow}>
-                        <Clock size={14} color="#6B7280" />
-                        <span style={styles.cardRowText}>
-                          {l.from_time ? formatTime(l.from_time) : 'Anytime'} {l.to_time ? `– ${formatTime(l.to_time)}` : ''}
+                      <div style={styles.cardTop}>
+                        <span style={styles.spotTypeBadge}>{l.spot_type}</span>
+                        <span style={available ? styles.availableBadge : styles.bookedBadge}>
+                          {available ? 'Available' : (isBookedByMe ? 'Booked by you' : 'Booked')}
                         </span>
                       </div>
-                    )}
-                    {l.notes && <p style={styles.notes}>"{l.notes}"</p>}
-                    <div style={styles.cardFooter}>
-                      <div style={styles.price}>
-                        <IndianRupee size={16} strokeWidth={2.5} />
-                        <span className="pe-display" style={{ fontSize: 20 }}>{l.price}</span>
-                        <span style={styles.perHour}>/hr</span>
+                      <div style={styles.cardArea}>
+                        <MapPin size={16} color="#FF6B5B" />
+                        <span style={{ fontWeight: 800, fontSize: 16 }}>{l.area}</span>
                       </div>
-                      <div style={styles.contactBtns}>
-                        <a
-                          href={whatsappLink(l.phone, l.area)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={styles.whatsappBtn}
-                          onClick={() => showToast(`Opening WhatsApp for ${l.host_name}…`)}
-                        >
-                          <MessageCircle size={14} />
-                        </a>
-                        <a href={`tel:${l.phone}`} style={styles.callBtn} onClick={() => showToast(`Calling ${l.host_name}…`)}>
-                          <Phone size={14} /> Call {l.host_name.split(' ')[0]}
-                        </a>
+                      <p style={styles.cardAddress}>{l.address}</p>
+                      {distanceKm != null && (
+                        <div style={styles.cardRow}>
+                          <Navigation size={13} color="#6B7280" />
+                          <span style={styles.cardRowText}>{distanceKm.toFixed(1)} km away</span>
+                        </div>
+                      )}
+                      {(l.from_time || l.to_time) && (
+                        <div style={styles.cardRow}>
+                          <Clock size={14} color="#6B7280" />
+                          <span style={styles.cardRowText}>
+                            {l.from_time ? formatTime(l.from_time) : 'Anytime'} {l.to_time ? `– ${formatTime(l.to_time)}` : ''}
+                          </span>
+                        </div>
+                      )}
+                      {l.notes && <p style={styles.notes}>"{l.notes}"</p>}
+
+                      <div style={styles.priceRow}>
+                        <div style={styles.price}>
+                          <IndianRupee size={16} strokeWidth={2.5} />
+                          <span className="pe-display" style={{ fontSize: 20 }}>{l.price}</span>
+                          <span style={styles.perHour}>/hr</span>
+                        </div>
+                        <div style={styles.hoursStepper}>
+                          <button style={styles.stepperBtn} onClick={() => changeHours(l.id, -1)}><Minus size={12} /></button>
+                          <span style={styles.stepperVal}>{hours} hr{hours > 1 ? 's' : ''}</span>
+                          <button style={styles.stepperBtn} onClick={() => changeHours(l.id, 1)}><Plus size={12} /></button>
+                        </div>
                       </div>
-                    </div>
-                    {l.owner_id === ownerId && (
-                      <button
-                        style={styles.availToggle}
-                        onClick={() => handleToggleAvailable(l)}
-                      >
-                        {l.is_available === false ? (
-                          <><ToggleLeft size={16} /> Mark as available</>
-                        ) : (
-                          <><ToggleRight size={16} color="#16A34A" /> Mark as occupied</>
+                      <p style={styles.estTotalText}>Est. total: ₹{estTotal} for {hours} hr{hours > 1 ? 's' : ''}</p>
+
+                      <div style={styles.cardFooter}>
+                        <div style={styles.contactBtns}>
+                          <a href={whatsappLink(l.phone, l.area)} target="_blank" rel="noopener noreferrer" style={styles.whatsappBtn} onClick={() => showToast(`Opening WhatsApp for ${l.host_name}…`)}>
+                            <MessageCircle size={14} />
+                          </a>
+                          <a href={`tel:${l.phone}`} style={styles.callBtn} onClick={() => showToast(`Calling ${l.host_name}…`)}>
+                            <Phone size={14} /> Call
+                          </a>
+                        </div>
+                        {!isOwner && available && (
+                          <button className="pe-book-btn" style={styles.bookBtn} onClick={() => handleBook(l)}>
+                            Book this spot
+                          </button>
                         )}
-                      </button>
-                    )}
-                    <button style={styles.removeBtn} onClick={() => handleRemove(l.id)} title="Remove this listing">
-                      <X size={13} />
-                    </button>
-                  </div>
-                ))}
+                        {!isOwner && !available && isBookedByMe && (
+                          <button style={styles.cancelBookBtn} onClick={() => handleCancelBooking(l)}>
+                            Cancel booking
+                          </button>
+                        )}
+                      </div>
+
+                      {isOwner && (
+                        <button style={styles.availToggle} onClick={() => handleToggleAvailable(l)}>
+                          {!available ? (<><ToggleLeft size={16} /> Mark as available</>) : (<><ToggleRight size={16} color="#16A34A" /> Mark as occupied</>)}
+                        </button>
+                      )}
+
+                      <div style={styles.ratingRow}>
+                        <button
+                          style={{ ...styles.thumbBtn, ...(rating?.myVote === true ? styles.thumbBtnActiveUp : {}) }}
+                          onClick={() => handleRate(l.id, true)}
+                          title="Good experience"
+                        >
+                          <ThumbsUp size={13} />
+                        </button>
+                        <button
+                          style={{ ...styles.thumbBtn, ...(rating?.myVote === false ? styles.thumbBtnActiveDown : {}) }}
+                          onClick={() => handleRate(l.id, false)}
+                          title="Bad experience"
+                        >
+                          <ThumbsDown size={13} />
+                        </button>
+                        {rating && rating.total > 0 && (
+                          <span style={styles.ratingText}>
+                            {Math.round((rating.up / rating.total) * 100)}% positive ({rating.total})
+                          </span>
+                        )}
+                      </div>
+
+                      {isOwner && (
+                        <button style={styles.removeBtn} onClick={() => handleRemove(l.id)} title="Remove this listing">
+                          <X size={13} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -445,20 +589,18 @@ export default function App() {
             <label style={styles.label}>Notes (optional)</label>
             <textarea style={{ ...styles.input, minHeight: 70, resize: 'vertical' }} placeholder="e.g. Honk once, gate is unlocked till 9pm" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
 
-            <label style={styles.label}>Pin the exact location (optional)</label>
-            <p style={styles.hint}>Tap on the map where your spot is. This helps people find it on the map view.</p>
-            <LocationPicker value={location} onChange={setLocation} />
+            <label style={styles.label}>Location on map</label>
+            <p style={styles.hint}>
+              {geocoding ? 'Locating your address…' : locationSetManually ? 'Pinned manually — tap the map to adjust.' : location ? 'Located from your address — tap the map to fine-tune.' : 'Type your address above and we\'ll locate it here automatically. You can also tap the map to set it manually.'}
+            </p>
+            <LocationPicker value={location} onChange={handleManualPin} />
 
             <label style={styles.label}>Add a photo (optional)</label>
             <p style={styles.hint}>A photo of the driveway or gate helps people recognize it.</p>
             {photoPreview ? (
               <div style={styles.photoPreviewWrap}>
                 <img src={photoPreview} alt="Preview" style={styles.photoPreview} />
-                <button
-                  type="button"
-                  style={styles.removePhotoBtn}
-                  onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}
-                >
+                <button type="button" style={styles.removePhotoBtn} onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}>
                   <X size={13} /> Remove
                 </button>
               </div>
@@ -490,10 +632,10 @@ const styles = {
   page: { minHeight: '100vh', background: '#FAF9F6', color: '#16213E', paddingBottom: 40 },
   header: { background: '#16213E', paddingTop: 28, paddingBottom: 8, position: 'relative', overflow: 'hidden' },
   headerInner: { padding: '0 20px' },
-  brand: { display: 'flex', alignItems: 'center', gap: 10 },
-  brandIcon: { width: 34, height: 34, borderRadius: 9, background: '#FFC93C', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  brandName: { color: '#FAF9F6', fontSize: 22, letterSpacing: '0.5px' },
-  tagline: { color: '#A9B4D0', fontSize: 13.5, marginTop: 8, marginBottom: 20, fontWeight: 500 },
+  brand: { display: 'flex', alignItems: 'center', gap: 12 },
+  brandIcon: { width: 48, height: 48, borderRadius: 12, background: '#FFC93C', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  brandName: { color: '#FAF9F6', fontSize: 32, letterSpacing: '0.5px' },
+  tagline: { color: '#A9B4D0', fontSize: 15.5, marginTop: 10, marginBottom: 20, fontWeight: 600 },
   routeSvg: { width: '100%', height: 70, display: 'block' },
   routeLabels: { display: 'flex', justifyContent: 'space-between', padding: '2px 22px 16px' },
   routeLabel: { color: '#FF6B5B', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px' },
@@ -507,37 +649,51 @@ const styles = {
   viewToggle: { display: 'flex', border: '1.5px solid #E5E1D8', borderRadius: 10, overflow: 'hidden', background: '#fff' },
   viewToggleBtn: { width: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: 'transparent', color: '#9CA3AF', cursor: 'pointer' },
   viewToggleBtnActive: { background: '#16213E', color: '#FFC93C' },
-  cardPhoto: { width: '100%', height: 140, objectFit: 'cover', borderRadius: 10, marginBottom: 10, display: 'block' },
-  hint: { fontSize: 12, color: '#9CA3AF', margin: '0 0 8px', lineHeight: 1.4 },
-  photoUploadBtn: { display: 'flex', alignItems: 'center', gap: 8, padding: '11px 12px', borderRadius: 8, border: '1.5px dashed #D1D5DB', background: '#FAF9F6', color: '#6B7280', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', width: 'fit-content' },
-  photoPreviewWrap: { position: 'relative', width: 140 },
-  photoPreview: { width: 140, height: 100, objectFit: 'cover', borderRadius: 8, border: '1.5px solid #E5E1D8', display: 'block' },
-  removePhotoBtn: { display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, border: 'none', background: 'transparent', color: '#FF6B5B', fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 },
-  occupiedBadge: { fontSize: 11, fontWeight: 700, color: '#B91C1C', background: '#FEE2E2', padding: '3px 8px', borderRadius: 100 },
-  contactBtns: { display: 'flex', alignItems: 'center', gap: 6 },
-  whatsappBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, background: '#25D366', color: '#fff', borderRadius: 8, flexShrink: 0 },
-  availToggle: { display: 'flex', alignItems: 'center', gap: 5, marginTop: 10, width: '100%', justifyContent: 'center', background: '#FAF9F6', border: '1.5px solid #E5E1D8', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontWeight: 700, color: '#16213E', cursor: 'pointer' },
   emptyState: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '50px 20px', textAlign: 'center' },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 },
   card: { position: 'relative', background: '#fff', borderRadius: 14, padding: 16, border: '1.5px solid #EDEAE1', boxShadow: '0 1px 2px rgba(22,33,62,0.04)' },
+  cardAvailable: { borderLeft: '4px solid #16A34A' },
+  cardBooked: { borderLeft: '4px solid #9CA3AF', opacity: 0.72 },
+  cardPhoto: { width: '100%', height: 140, objectFit: 'cover', borderRadius: 10, marginBottom: 10, display: 'block' },
   cardTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   spotTypeBadge: { fontSize: 11, fontWeight: 700, color: '#16213E', background: '#FFC93C', padding: '3px 8px', borderRadius: 100, textTransform: 'uppercase', letterSpacing: '0.3px' },
-  timeAgo: { fontSize: 11.5, color: '#9CA3AF', fontWeight: 600 },
+  availableBadge: { fontSize: 11, fontWeight: 700, color: '#166534', background: '#DCFCE7', padding: '3px 8px', borderRadius: 100 },
+  bookedBadge: { fontSize: 11, fontWeight: 700, color: '#4B5563', background: '#E5E7EB', padding: '3px 8px', borderRadius: 100 },
   cardArea: { display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 },
   cardAddress: { fontSize: 13.5, color: '#6B7280', margin: '0 0 8px', lineHeight: 1.4 },
   cardRow: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 },
   cardRowText: { fontSize: 13, color: '#374151', fontWeight: 600 },
   notes: { fontSize: 12.5, color: '#9CA3AF', fontStyle: 'italic', margin: '4px 0 10px' },
-  cardFooter: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 12, borderTop: '1px dashed #EDEAE1' },
+  priceRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 12, borderTop: '1px dashed #EDEAE1' },
   price: { display: 'flex', alignItems: 'center', color: '#16213E' },
   perHour: { fontSize: 12, color: '#9CA3AF', marginLeft: 3, fontWeight: 600 },
+  hoursStepper: { display: 'flex', alignItems: 'center', gap: 8, background: '#FAF9F6', border: '1.5px solid #E5E1D8', borderRadius: 8, padding: '4px 8px' },
+  stepperBtn: { width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: '#fff', borderRadius: 6, color: '#16213E', cursor: 'pointer', boxShadow: '0 1px 2px rgba(0,0,0,0.08)' },
+  stepperVal: { fontSize: 12.5, fontWeight: 700, color: '#16213E', minWidth: 34, textAlign: 'center' },
+  estTotalText: { fontSize: 12, color: '#6B7280', margin: '6px 0 0' },
+  cardFooter: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 8, flexWrap: 'wrap' },
+  contactBtns: { display: 'flex', alignItems: 'center', gap: 6 },
+  whatsappBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, background: '#25D366', color: '#fff', borderRadius: 8, flexShrink: 0 },
   callBtn: { display: 'flex', alignItems: 'center', gap: 5, background: '#FF6B5B', color: '#fff', fontSize: 13, fontWeight: 700, padding: '8px 12px', borderRadius: 8, textDecoration: 'none' },
+  bookBtn: { background: '#16A34A', color: '#fff', border: 'none', fontSize: 13, fontWeight: 800, padding: '9px 14px', borderRadius: 8, cursor: 'pointer' },
+  cancelBookBtn: { background: '#FEE2E2', color: '#B91C1C', border: 'none', fontSize: 13, fontWeight: 700, padding: '9px 14px', borderRadius: 8, cursor: 'pointer' },
+  availToggle: { display: 'flex', alignItems: 'center', gap: 5, marginTop: 10, width: '100%', justifyContent: 'center', background: '#FAF9F6', border: '1.5px solid #E5E1D8', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontWeight: 700, color: '#16213E', cursor: 'pointer' },
+  ratingRow: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, paddingTop: 10, borderTop: '1px dashed #EDEAE1' },
+  thumbBtn: { width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1.5px solid #E5E1D8', background: '#fff', borderRadius: 7, color: '#9CA3AF', cursor: 'pointer' },
+  thumbBtnActiveUp: { background: '#DCFCE7', borderColor: '#16A34A', color: '#16A34A' },
+  thumbBtnActiveDown: { background: '#FEE2E2', borderColor: '#B91C1C', color: '#B91C1C' },
+  ratingText: { fontSize: 11.5, color: '#6B7280', fontWeight: 600, marginLeft: 2 },
   removeBtn: { position: 'absolute', top: 10, right: 10, width: 20, height: 20, borderRadius: '50%', border: 'none', background: '#F3F1EA', color: '#9CA3AF', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: 10 },
   form: { display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 14, padding: 20, border: '1.5px solid #EDEAE1', marginBottom: 20 },
   formIntro: { fontSize: 13.5, color: '#6B7280', marginTop: 0, marginBottom: 16, lineHeight: 1.5 },
   label: { fontSize: 12.5, fontWeight: 700, color: '#16213E', marginBottom: 5, marginTop: 12 },
   input: { width: '100%', padding: '11px 12px', borderRadius: 8, border: '1.5px solid #E5E1D8', fontSize: 14, color: '#16213E', background: '#FAF9F6' },
   timeRow: { display: 'flex', gap: 10 },
+  hint: { fontSize: 12, color: '#9CA3AF', margin: '0 0 8px', lineHeight: 1.4 },
+  photoUploadBtn: { display: 'flex', alignItems: 'center', gap: 8, padding: '11px 12px', borderRadius: 8, border: '1.5px dashed #D1D5DB', background: '#FAF9F6', color: '#6B7280', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', width: 'fit-content' },
+  photoPreviewWrap: { position: 'relative', width: 140 },
+  photoPreview: { width: 140, height: 100, objectFit: 'cover', borderRadius: 8, border: '1.5px solid #E5E1D8', display: 'block' },
+  removePhotoBtn: { display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, border: 'none', background: 'transparent', color: '#FF6B5B', fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0 },
   formError: { color: '#FF6B5B', fontSize: 13, fontWeight: 600, marginTop: 14 },
   privacyNote: { fontSize: 11.5, color: '#9CA3AF', marginTop: 14, lineHeight: 1.4 },
   primaryBtn: { marginTop: 16, background: '#FFC93C', color: '#16213E', border: 'none', borderRadius: 10, padding: '13px 20px', fontSize: 15, fontWeight: 800, cursor: 'pointer', transition: 'all 0.15s' },
