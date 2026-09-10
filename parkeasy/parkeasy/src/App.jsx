@@ -30,17 +30,22 @@ function whatsappLink(phone, area) {
 }
 
 async function geocodeAddress(query) {
-  if (!query || query.trim().length < 5) return null;
+  if (!query || query.trim().length < 3) return null;
   try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=in&q=${encodeURIComponent(query)}`;
     const res = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn('ParkEasy geocode: request failed', res.status);
+      return null;
+    }
     const data = await res.json();
     if (data && data.length > 0) {
       return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
     }
+    console.warn('ParkEasy geocode: no results for', query);
     return null;
   } catch (e) {
+    console.warn('ParkEasy geocode: error', e);
     return null;
   }
 }
@@ -93,6 +98,8 @@ export default function App() {
   const [location, setLocation] = useState(null);
   const [locationSetManually, setLocationSetManually] = useState(false);
   const [geocoding, setGeocoding] = useState(false);
+  const [locationApproximate, setLocationApproximate] = useState(false);
+  const [locationNotFound, setLocationNotFound] = useState(false);
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -112,13 +119,24 @@ export default function App() {
   // Auto-locate the address on the map as the person types (debounced), unless they've manually pinned it
   useEffect(() => {
     if (locationSetManually) return;
-    if (!form.address || form.address.trim().length < 5) return;
+    if (!form.address || form.address.trim().length < 4) return;
     const timer = setTimeout(async () => {
       setGeocoding(true);
-      const q = `${form.address}, ${form.area || ''}, Chennai, India`;
-      const pos = await geocodeAddress(q);
+      const fullQuery = `${form.address}, ${form.area || ''}, Chennai, India`;
+      let pos = await geocodeAddress(fullQuery);
+      let approximate = false;
+      if (!pos && form.area) {
+        // House names / informal addresses often aren't mapped — fall back to just the area
+        pos = await geocodeAddress(`${form.area}, Chennai, India`);
+        approximate = true;
+      }
       setGeocoding(false);
-      if (pos) setLocation(pos);
+      setLocationApproximate(approximate);
+      if (pos) {
+        setLocation(pos);
+      } else {
+        setLocationNotFound(true);
+      }
     }, 900);
     return () => clearTimeout(timer);
   }, [form.address, form.area, locationSetManually]);
@@ -154,6 +172,8 @@ export default function App() {
   function handleManualPin(pos) {
     setLocation(pos);
     setLocationSetManually(true);
+    setLocationNotFound(false);
+    setLocationApproximate(false);
   }
 
   async function handleSubmit(e) {
@@ -210,6 +230,8 @@ export default function App() {
     setForm({ area: '', address: '', price: '', from: '', to: '', hostName: '', phone: '', notes: '', spotType: 'Driveway' });
     setLocation(null);
     setLocationSetManually(false);
+    setLocationApproximate(false);
+    setLocationNotFound(false);
     setPhotoFile(null);
     setPhotoPreview(null);
     showToast('Your spot is live!');
@@ -591,7 +613,17 @@ export default function App() {
 
             <label style={styles.label}>Location on map</label>
             <p style={styles.hint}>
-              {geocoding ? 'Locating your address…' : locationSetManually ? 'Pinned manually — tap the map to adjust.' : location ? 'Located from your address — tap the map to fine-tune.' : 'Type your address above and we\'ll locate it here automatically. You can also tap the map to set it manually.'}
+              {geocoding
+                ? 'Locating your address…'
+                : locationSetManually
+                ? 'Pinned manually — tap the map to adjust.'
+                : locationApproximate && location
+                ? "Couldn't find that exact address, so we've pointed to the general area — tap the map to place the pin precisely."
+                : locationNotFound
+                ? "Couldn't locate that automatically. Please tap the map below to drop the pin yourself."
+                : location
+                ? 'Located from your address — tap the map to fine-tune.'
+                : "Type your address above and we'll try to locate it here automatically. You can also tap the map to set it manually."}
             </p>
             <LocationPicker value={location} onChange={handleManualPin} />
 
